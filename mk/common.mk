@@ -6,6 +6,17 @@ CFLAGS+=	$(CPPFLAGS)
 CFLAGS+=	-Werror=implicit-function-declaration
 CFLAGS+=	-Werror=return-type
 
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+	OSFLAG += -D DARWIN
+	CFLAGS += \
+				-I/opt/homebrew/opt/openssl/include \
+				-I/opt/homebrew/opt/libarchive/include
+	LDFLAGS += \
+				-L/opt/homebrew/opt/openssl/lib \
+				-L/opt/homebrew/opt/libarchive/lib
+endif
+
 # bmake's traditional include support treats empty strings in the expanded
 # result (whether because the variable is empty or there are consecutive
 # whitespace characters) as file names, and thus tries to read the containing

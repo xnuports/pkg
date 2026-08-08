@@ -47,6 +47,7 @@ $(FUZZ_TARGETS): $(top_builddir)/libpkg/libpkg_flat.a
 
 clean:
 	rm -f $(FUZZ_TARGETS)
+	rm -f Makefile
 
 run: all
 	@for t in $(FUZZ_TARGETS); do \

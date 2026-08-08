@@ -83,12 +83,15 @@ LOCAL_CFLAGS=	-I$(top_srcdir)/compat \
 		-I$(top_builddir)/libpkg \
 		-I$(top_srcdir) \
 		-I$(top_builddir) \
-		-Wl,--as-needed \
 		-Wno-pointer-sign \
 		-Wno-missing-field-initializers \
 		-Wno-sign-compare \
-		-DPREFIX=\"$(PREFIX)\" \
 		-DHAVE_CONFIG_H
+
+UNAME_S := $(shell uname -s)
+ifneq ($(UNAME_S),Darwin)
+	LOCAL_CFLAGS+= -Wl,--as-needed
+endif
 
 LOCAL_LDFLAGS=	@waflags@ \
 		@REPOS_LDFLAGS@ \

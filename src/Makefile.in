@@ -95,11 +95,16 @@ STATIC_ARG=
 LOCAL_LDFLAGS=	-Wl,-Bstatic \
 		@waflags@ $(LIBPKGFLAT) @nowaflags@ \
 		$(LIBS) \
-		-Wl,-Bdynamic -Wl,--as-needed $(OTHER_LIBS) \
+		-Wl,-Bdynamic $(OTHER_LIBS) \
 		-Wl,--export-dynamic
 STATIC_ARG=	-static
 STATIC_LDFLAGS=	$(LIBPKGFLAT) $(LIBS) $(OTHER_LIBS) -Wl,--no-pie
 @endif
+
+UNAME_S := $(shell uname -s)
+ifneq ($(UNAME_S),Darwin)
+	LOCAL_CFLAGS+= -Wl,--as-needed
+endif
 
 # For libarchive
 STATIC_LDFLAGS+=	-lbz2 -lz -llzma @ZSTDLIB@
