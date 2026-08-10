@@ -169,10 +169,12 @@ pkg_start_stop_rc_scripts(struct pkg *pkg, pkg_rc_attr attr)
 			rcfile = file->path;
 			rcfile += len;
 			switch (attr) {
-			case PKG_RC_START:
+			case PKG_RC_ATTR_START:
+				pkg_emit_rc_script(rcfile, PKG_RC_START);
 				ret += rc_start(rcfile);
 				break;
-			case PKG_RC_STOP:
+			case PKG_RC_ATTR_STOP:
+				pkg_emit_rc_script(rcfile, PKG_RC_STOP);
 				ret += rc_stop(rcfile);
 				break;
 			}
@@ -313,7 +315,6 @@ pkg_deferred_rc_add(struct deferred_rc *rc, struct pkg *pkg, pkg_rc_attr attr)
 {
 	struct pkg_file *file = NULL;
 	char rc_d_path[PATH_MAX];
-	size_t len;
 	bool handle_rc;
 
 	handle_rc = pkg_object_bool(pkg_config_get("HANDLE_RC_SCRIPTS"));
@@ -321,20 +322,19 @@ pkg_deferred_rc_add(struct deferred_rc *rc, struct pkg *pkg, pkg_rc_attr attr)
 		return;
 
 	/* Do not manage rc scripts when operating on an alternate rootdir */
-	if (ctx.pkg_rootdir != NULL)
+	if (strcmp(ctx.pkg_rootdir, "/") != 0)
 		return;
 
 	snprintf(rc_d_path, sizeof(rc_d_path), "%s/etc/rc.d/", pkg->prefix);
-	len = strlen(rc_d_path);
 
 	while (pkg_files(pkg, &file) == EPKG_OK) {
-		if (strncmp(rc_d_path, file->path, len) != 0)
+		if (!STARTS_WITH(file->path, rc_d_path))
 			continue;
 
-		const char *rcname = file->path + len;
+		const char *rcname = file->path + strlen(rc_d_path);
 
 		switch (attr) {
-		case PKG_RC_STOP:
+		case PKG_RC_ATTR_STOP:
 			if (pkghash_get(rc->seen_stop, rcname) != NULL)
 				break;
 			pkghash_safe_add(rc->seen_stop, rcname, NULL, NULL);
@@ -354,7 +354,7 @@ pkg_deferred_rc_add(struct deferred_rc *rc, struct pkg *pkg, pkg_rc_attr attr)
 			}
 			vec_push(&rc->to_stop, entry);
 			break;
-		case PKG_RC_START:
+		case PKG_RC_ATTR_START:
 			if (pkghash_get(rc->seen_start, rcname) != NULL)
 				break;
 			pkghash_safe_add(rc->seen_start, rcname, NULL, NULL);
@@ -369,6 +369,9 @@ pkg_deferred_rc_execute(struct deferred_rc *rc)
 {
 	int ret = 0;
 
+	if (rc->to_stop.len == 0 && rc->to_start.len == 0)
+		return (ret);
+
 	/*
 	 * Upgrades (in both stop and start sets): "service <name> restart"
 	 * so the rc script can handle the transition gracefully.
@@ -378,8 +381,10 @@ pkg_deferred_rc_execute(struct deferred_rc *rc)
 	vec_foreach(rc->to_stop, i) {
 		struct deferred_rc_stop *s = &rc->to_stop.d[i];
 		if (pkghash_get(rc->seen_start, s->name) != NULL) {
+			pkg_emit_rc_script(s->name, PKG_RC_RESTART);
 			ret += service_cmd(s->name, "restart");
 		} else {
+			pkg_emit_rc_script(s->name, PKG_RC_STOP);
 			if (s->oldpath != NULL) {
 				ret += rc_stop_with_script(s->oldpath);
 			} else {
@@ -393,7 +398,7 @@ pkg_deferred_rc_execute(struct deferred_rc *rc)
 		char *name = rc->to_start.d[i];
 		if (pkghash_get(rc->seen_stop, name) != NULL)
 			continue;
-		pkg_emit_notice("Starting %s", name);
+		pkg_emit_rc_script(name, PKG_RC_START);
 		ret += rc_start(name);
 	}
 
