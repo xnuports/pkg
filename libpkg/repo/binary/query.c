@@ -837,7 +837,19 @@ pkg_repo_binary_file_which_parse(FILE *fp, struct pkg_repo *repo,
 					space++;
 				const char *prev = dirs.len > 0 ?
 				    dirs.d[dirs.len - 1] : "";
-				char *dir = xmalloc(strlen(prev) + strlen(space) + 1);
+				char *dir;
+
+				/*
+				 * The archive is untrusted input: clamp
+				 * prefix_len to the actual length of the
+				 * previous directory, otherwise the memcpy
+				 * below would read past it.
+				 */
+				if (prefix_len < 0)
+					prefix_len = 0;
+				if (prefix_len > (long)strlen(prev))
+					prefix_len = (long)strlen(prev);
+				dir = xmalloc(strlen(prev) + strlen(space) + 1);
 				memcpy(dir, prev, prefix_len);
 				strcpy(dir + prefix_len, space);
 				vec_push(&dirs, dir);
@@ -975,7 +987,19 @@ pkg_repo_binary_file_which_parse_glob(FILE *fp, struct pkg_repo *repo,
 					space++;
 				const char *prev = dirs.len > 0 ?
 				    dirs.d[dirs.len - 1] : "";
-				char *dir = xmalloc(strlen(prev) + strlen(space) + 1);
+				char *dir;
+
+				/*
+				 * The archive is untrusted input: clamp
+				 * prefix_len to the actual length of the
+				 * previous directory, otherwise the memcpy
+				 * below would read past it.
+				 */
+				if (prefix_len < 0)
+					prefix_len = 0;
+				if (prefix_len > (long)strlen(prev))
+					prefix_len = (long)strlen(prev);
+				dir = xmalloc(strlen(prev) + strlen(space) + 1);
 				memcpy(dir, prev, prefix_len);
 				strcpy(dir + prefix_len, space);
 				vec_push(&dirs, dir);
@@ -1179,6 +1203,12 @@ pkg_repo_binary_file_which(struct pkg_repo *repo, const char *path, bool glob)
 		}
 
 		it = pkg_repo_binary_file_which_glob_new(repo);
+		if (it == NULL) {
+			for (size_t i = 0; i < pairs.len; i++)
+				free(pairs.d[i].path);
+			vec_free(&pairs);
+			return (NULL);
+		}
 		((struct pkg_repo_file_which_glob *)it->data)->pairs = pairs;
 		return (it);
 	} else {
