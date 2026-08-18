@@ -1,4 +1,6 @@
+$(info CFLAGS=$(CFLAGS))
 CFLAGS?=	-O2 -pipe
+CFLAGS+=	-DPREFIX=\"$(PREFIX)\"
 OBJS=	${SRCS:.c=.o}
 SHOBJS?=	${SRCS:.c=.pico}
 DEPFILES=	${OBJS:.o=.Po} ${SHOBJS:.pico=.Ppico}
@@ -9,12 +11,14 @@ CFLAGS+=	-Werror=return-type
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 	OSFLAG += -D DARWIN
-	CFLAGS += \
-				-I/opt/homebrew/opt/openssl/include \
+	CFLAGS +=\
+				-I/opt/homebrew/opt/openssl/include\
 				-I/opt/homebrew/opt/libarchive/include
-	LDFLAGS += \
-				-L/opt/homebrew/opt/openssl/lib \
+	LDFLAGS +=\
+				-L/opt/homebrew/opt/openssl/lib\
 				-L/opt/homebrew/opt/libarchive/lib
+$(info AFTER_DARWIN CFLAGS=$(CFLAGS))
+$(info AFTER_DARWIN CFLAGS=$(CFLAGS))
 endif
 
 # bmake's traditional include support treats empty strings in the expanded
