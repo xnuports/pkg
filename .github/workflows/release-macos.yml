@@ -1,0 +1,134 @@
+##
+# Copyright (c) 2024 Keve Müller <kevemueller@users.github.com>
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# GitHub Actions workflow to build and release xnuports/pkg for macOS
+#
+# Triggers on tag pushes (e.g. v2.8.99.1), builds for arm64 and x86_64,
+# creates .tar.xz archives named for the pkg-bootstrap installer, and
+# uploads them as GitHub Release assets.
+
+name: release-macos
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build pkg for ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: pkg
+
+      - name: Install dependencies
+        run: |
+          brew update --quiet || true
+          brew install libarchive openssl pkg-config
+
+          # Ensure pkg-config finds brew's libarchive
+          echo "PKG_CONFIG_PATH=$(brew --prefix libarchive)/lib/pkgconfig" >> "${GITHUB_ENV}"
+
+      - name: Setup build environment
+        run: |
+          echo "CC=clang" >> "${GITHUB_ENV}"
+          echo "CXX=clang++" >> "${GITHUB_ENV}"
+          echo "PREFIX=${GITHUB_WORKSPACE}/install-${{ matrix.target }}" >> "${GITHUB_ENV}"
+          echo "NPROC=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" >> "${GITHUB_ENV}"
+
+      - name: Configure
+        working-directory: pkg
+        run: |
+          ./configure --prefix="${PREFIX}" \
+            --with-libarchive.pc \
+            --with-openssl.pc \
+            --host=${{ matrix.target }}
+
+      - name: Build
+        working-directory: pkg
+        run: make -j${NPROC}
+
+      - name: Install
+        working-directory: pkg
+        run: make install
+
+      - name: Package binaries
+        run: |
+          cd "${PREFIX}"
+
+          # Map target to bootstrap arch name
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) ARCH="arm64" ;;
+            x86_64-apple-darwin)  ARCH="x86_64" ;;
+          esac
+
+          # Create tarball matching pkg-bootstrap asset naming
+          tar -cJf "${GITHUB_WORKSPACE}/pkg-Darwin-${ARCH}.tar.xz" \
+            bin/ \
+            sbin/ \
+            lib/ \
+            share/man/ \
+            share/zsh/ \
+            etc/
+
+      - name: Generate checksums
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          shasum -a 256 pkg-Darwin-*.tar.xz > pkg-Darwin-checksums.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-macos-release
+          path: |
+            pkg-Darwin-*.tar.xz
+            pkg-Darwin-checksums.sha256
+          retention-days: 30
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          # Find and move all artifacts
+          find ./artifacts -type f | while read -r file; do
+            cp "$file" release-assets/
+          done
+
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            release-assets/pkg-Darwin-arm64.tar.xz
+            release-assets/pkg-Darwin-x86_64.tar.xz
+            release-assets/pkg-Darwin-checksums.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
