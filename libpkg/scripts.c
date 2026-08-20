@@ -152,43 +152,57 @@ pkg_script_run(struct pkg * const pkg, pkg_script type, bool upgrade, bool noexe
 
 			setenv("PKG_MSGFD", "4", 1);
 
-			posix_spawn_file_actions_adddup2(&action, cur_pipe[1], 4);
-			posix_spawn_file_actions_addclose(&action, cur_pipe[0]);
-			/*
-			 * consider cur_pipe[1] to probably be the latest
-			 * opened fd, close all useless fds up to there
-			 */
-			for (int k = 5; k <= cur_pipe[1]; k++) {
-				if (k != cur_pipe[0] && k != ctx.devnullfd)
-					posix_spawn_file_actions_addclose(&action, k);
+		posix_spawn_file_actions_adddup2(&action, cur_pipe[1], 4);
+		posix_spawn_file_actions_addclose(&action, cur_pipe[0]);
+		/*
+		 * Build the close list after all fd-consuming actions
+		 * (dup2/close for stdin_pipe) are registered, so we don't
+		 * accidentally close an fd that a later action still needs.
+		 */
+		if (argmax < 0 || script_cmd.len > (size_t)argmax) {
+			if (pipe(stdin_pipe) < 0) {
+				ret = EPKG_FATAL;
+				posix_spawn_file_actions_destroy(&action);
+				goto cleanup;
 			}
-			if (argmax < 0 || script_cmd.len > (size_t)argmax) {
-				if (pipe(stdin_pipe) < 0) {
-					ret = EPKG_FATAL;
-					posix_spawn_file_actions_destroy(&action);
-					goto cleanup;
-				}
 
-				posix_spawn_file_actions_adddup2(&action, stdin_pipe[0],
-				    STDIN_FILENO);
-				posix_spawn_file_actions_addclose(&action, stdin_pipe[1]);
+			posix_spawn_file_actions_adddup2(&action, stdin_pipe[0],
+			    STDIN_FILENO);
+			posix_spawn_file_actions_addclose(&action, stdin_pipe[1]);
 
-				argv[0] = _PATH_BSHELL;
-				argv[1] = "-s";
-				argv[2] = NULL;
+			argv[0] = _PATH_BSHELL;
+			argv[1] = "-s";
+			argv[2] = NULL;
 
-				use_pipe = 1;
-			} else {
-				posix_spawn_file_actions_adddup2(&action,
-				    ctx.devnullfd, STDIN_FILENO);
+			use_pipe = 1;
+		} else {
+			posix_spawn_file_actions_adddup2(&action,
+			    ctx.devnullfd, STDIN_FILENO);
 
-				argv[0] = _PATH_BSHELL;
-				argv[1] = "-c";
-				argv[2] = sb_str(&script_cmd);
-				argv[3] = NULL;
+			argv[0] = _PATH_BSHELL;
+			argv[1] = "-c";
+			argv[2] = sb_str(&script_cmd);
+			argv[3] = NULL;
 
-				use_pipe = 0;
+			use_pipe = 0;
+		}
+
+		{
+			int max_fd = cur_pipe[1];
+			if (use_pipe) {
+				if (stdin_pipe[0] > max_fd)
+					max_fd = stdin_pipe[0];
+				if (stdin_pipe[1] > max_fd)
+					max_fd = stdin_pipe[1];
 			}
+			for (int k = 5; k <= max_fd; k++) {
+				if (k == cur_pipe[0] || k == ctx.devnullfd)
+					continue;
+				if (use_pipe && (k == stdin_pipe[0] || k == stdin_pipe[1]))
+					continue;
+				posix_spawn_file_actions_addclose(&action, k);
+			}
+		}
 
 			if ((error = posix_spawn(&pid, _PATH_BSHELL, &action,
 			    NULL, __DECONST(char **, argv),
