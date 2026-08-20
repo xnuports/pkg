@@ -187,22 +187,10 @@ pkg_script_run(struct pkg * const pkg, pkg_script type, bool upgrade, bool noexe
 			use_pipe = 0;
 		}
 
-		{
-			int max_fd = cur_pipe[1];
-			if (use_pipe) {
-				if (stdin_pipe[0] > max_fd)
-					max_fd = stdin_pipe[0];
-				if (stdin_pipe[1] > max_fd)
-					max_fd = stdin_pipe[1];
-			}
-			for (int k = 5; k <= max_fd; k++) {
-				if (k == cur_pipe[0] || k == ctx.devnullfd)
-					continue;
-				if (use_pipe && (k == stdin_pipe[0] || k == stdin_pipe[1]))
-					continue;
-				posix_spawn_file_actions_addclose(&action, k);
-			}
+		if (use_pipe) {
+			posix_spawn_file_actions_addclose(&action, stdin_pipe[0]);
 		}
+		posix_spawn_file_actions_addclose(&action, cur_pipe[1]);
 
 			if ((error = posix_spawn(&pid, _PATH_BSHELL, &action,
 			    NULL, __DECONST(char **, argv),
