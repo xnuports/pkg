@@ -25,7 +25,7 @@
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
-#include <xstring.h>
+#include <pkg/sb.h>
 
 #include <dirent.h>
 
@@ -195,7 +195,7 @@ attempt_to_merge(int rootfd, struct pkg_config_file *rcf, struct pkg *local,
 {
 	const struct pkg_file *lf = NULL;
 	struct stat st;
-	xstring *newconf;
+	sb_t newconf =  sb_init();
 	struct pkg_config_file *lcf = NULL;
 	size_t lcf_len;
 
@@ -267,12 +267,11 @@ attempt_to_merge(int rootfd, struct pkg_config_file *rcf, struct pkg *local,
 		if (rcf->status == MERGE_SUCCESS)
 			goto ret;
 	}
-	newconf = xstring_new();
-	if (merge_3way(lcf->content, localconf, rcf->content, newconf) != 0) {
-		xstring_free(newconf);
+	if (merge_3way(lcf->content, localconf, rcf->content, &newconf) != 0) {
+		sb_fini(&newconf);
 		pkg_emit_error("Unable to merge configuration file: %s", rcf->path);
 	} else {
-		char *conf = xstring_get(newconf);
+		char *conf = sb_get(&newconf);
 		rcf->newcontent = conf;
 		rcf->status = MERGE_SUCCESS;
 	}
@@ -396,25 +395,10 @@ set_attr_tofd(int fd, const char *path, mode_t perm, uid_t uid, gid_t gid,
 static void
 fill_timespec_buf(const struct stat *aest, struct timespec tspec[2])
 {
-#ifdef HAVE_STRUCT_STAT_ST_MTIM
 	tspec[0].tv_sec = aest->st_atim.tv_sec;
 	tspec[0].tv_nsec = 0;
 	tspec[1].tv_sec = aest->st_mtim.tv_sec;
 	tspec[1].tv_nsec = 0;
-#else
-# if defined(_DARWIN_C_SOURCE) || defined(__APPLE__)
-	tspec[0].tv_sec = aest->st_atimespec.tv_sec;
-	tspec[0].tv_nsec = 0;
-	tspec[1].tv_sec = aest->st_mtimespec.tv_sec;
-	tspec[1].tv_nsec = 0;
-# else
-	/* Portable unix version */
-	tspec[0].tv_sec = aest->st_atime;
-	tspec[0].tv_nsec = 0;
-	tspec[1].tv_sec = aest->st_mtime;
-	tspec[1].tv_nsec = 0;
-# endif
-#endif
 }
 
 static void
@@ -1601,7 +1585,7 @@ pkg_add_common(struct pkgdb *db, const char *path, unsigned flags,
 	struct archive		*a = NULL;
 	struct archive_entry	*ae = NULL;
 	struct pkg		*pkg = NULL;
-	xstring			*message = NULL;
+	sb_t message = sb_init();
 	struct pkg_message	*msg;
 	struct pkg_file		*f;
 	const char		*msgstr;
@@ -1833,19 +1817,16 @@ pkg_add_common(struct pkgdb *db, const char *path, unsigned flags,
 			msgstr = msg->str;
 		}
 		if (msgstr != NULL) {
-			if (message == NULL) {
-				message = xstring_new();
-				pkg_fprintf(message->fp, "=====\nMessage from "
+			if (message.len == 0) {
+				pkg_sb_printf(&message, "=====\nMessage from "
 				    "%n-%v:\n\n", pkg, pkg);
 			}
-			xstring_printf(message, "--\n%s\n", msgstr);
+			sb_printf(&message, "--\n%s\n", msgstr);
 		}
 	}
-	if (pkg_has_message(pkg) && message != NULL) {
-		xstring_flush(message);
-		pkg_emit_message(message->buf);
-		xstring_free(message);
-	}
+	if (pkg_has_message(pkg) && message.len != 0)
+		pkg_emit_message(sb_str(&message));
+	sb_fini(&message);
 
 cleanup:
 	if (openxact)
@@ -2012,20 +1993,8 @@ pkg_add_fromdir(struct pkg *pkg, const char *src, struct pkgdb *db __unused)
 		} else {
 			d->gid = st.st_gid;
 		}
-#ifdef HAVE_STRUCT_STAT_ST_MTIM
 		d->time[0] = st.st_atim;
 		d->time[1] = st.st_mtim;
-#else
-#if defined(_DARWIN_C_SOURCE) || defined(__APPLE__)
-		d->time[0] = st.st_atimespec;
-		d->time[1] = st.st_mtimespec;
-#else
-		d->time[0].tv_sec = st.st_atime;
-		d->time[0].tv_nsec = 0;
-		d->time[1].tv_sec = st.st_mtime;
-		d->time[1].tv_nsec = 0;
-#endif
-#endif
 
 		if (create_dir(&context, d, &tempdirs) == EPKG_FATAL) {
 			retcode = EPKG_FATAL;
@@ -2094,20 +2063,8 @@ pkg_add_fromdir(struct pkg *pkg, const char *src, struct pkgdb *db __unused)
 			f->perm = st.st_mode & ~S_IFMT;
 		if (f->uid == 0 && install_as_user)
 			f->uid = st.st_uid;
-#ifdef HAVE_STRUCT_STAT_ST_MTIM
 		f->time[0] = st.st_atim;
 		f->time[1] = st.st_mtim;
-#else
-#if defined(_DARWIN_C_SOURCE) || defined(__APPLE__)
-		f->time[0] = st.st_atimespec;
-		f->time[1] = st.st_mtimespec;
-#else
-		f->time[0].tv_sec = st.st_atime;
-		f->time[0].tv_nsec = 0;
-		f->time[1].tv_sec = st.st_mtime;
-		f->time[1].tv_nsec = 0;
-#endif
-#endif
 
 		if (S_ISLNK(st.st_mode)) {
 			if ((link_len = readlinkat(fromfd,

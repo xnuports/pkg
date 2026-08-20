@@ -1,10 +1,7 @@
 include @builddir@/mk/defs.mk
 LIB=	bsd_compat
-SRCS=	closefrom.c \
-	humanize_number.c \
-	strtonum.c \
-	funopen.c \
-	reallocf.c
+SRCS=	humanize_number.c \
+	strtonum.c
 
 LOCAL_CFLAGS=	-I$(top_srcdir)/compat \
 		-I$(top_srcdir)/libpkg \
@@ -14,4 +11,3 @@ LOCAL_CFLAGS=	-I$(top_srcdir)/compat \
 VPATH=	$(top_srcdir)/compat
 
 include $(MK)/static-lib.mk
-

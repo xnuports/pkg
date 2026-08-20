@@ -54,24 +54,55 @@ struct http_mirror {
 	struct http_mirror *next;
 };
 
+#define PKG_HTTP_MIRROR_LIST_MAX_SIZE	(1024 * 1024)
+#define PKG_HTTP_MIRROR_LIST_MAX_LINE	MAXPATHLEN
+#define PKG_HTTP_MIRROR_LIST_MAX_ENTRIES	256
+
 static void
 gethttpmirrors(struct pkg_repo *repo, const char *url, bool withdoc) {
 	FILE *f;
-	char *line = NULL, *walk;
-	size_t linecap = 0;
-	ssize_t linelen;
-	struct http_mirror *m;
+	char line[PKG_HTTP_MIRROR_LIST_MAX_LINE];
+	char *walk;
+	size_t linelen, total = 0, nmirrors = 0;
+	int c;
+	struct http_mirror *m, *new_mirrors = NULL, *tmp;
 	struct url *u;
+	bool accepted = false;
 
-	if ((f = fetchGetURL(url, "")) == NULL)
+	/*
+	 * The mirror list is advisory and is not protected by repository
+	 * signatures.  Do not reuse its connection so an early error does not
+	 * make fclose() drain an arbitrary response body.
+	 */
+	if ((f = fetchGetURL(url, "c")) == NULL)
 		return;
 
-	while ((linelen = getline(&line, &linecap, f)) > 0) {
+	for (;;) {
+		linelen = 0;
+		while ((c = fgetc(f)) != EOF) {
+			if (++total > PKG_HTTP_MIRROR_LIST_MAX_SIZE) {
+				pkg_emit_error("HTTP mirror list exceeds %d bytes",
+				    PKG_HTTP_MIRROR_LIST_MAX_SIZE);
+				goto done;
+			}
+			if (c == '\0' || linelen == sizeof(line) - 1) {
+				pkg_emit_error("HTTP mirror list contains an invalid line");
+				goto done;
+			}
+			if (c == '\n')
+				break;
+			line[linelen++] = c;
+		}
+		if (ferror(f))
+			goto done;
+		if (linelen == 0 && c == EOF)
+			break;
+		line[linelen] = '\0';
+
 		if (strncmp(line, "URL:", 4) == 0) {
 			walk = line;
-			/* trim '\n' */
-			if (walk[linelen - 1] == '\n')
-				walk[linelen - 1 ] = '\0';
+			if (linelen > 0 && walk[linelen - 1] == '\r')
+				walk[linelen - 1] = '\0';
 
 			walk += 4;
 			while (isspace(*walk)) {
@@ -81,17 +112,34 @@ gethttpmirrors(struct pkg_repo *repo, const char *url, bool withdoc) {
 				continue;
 
 			if ((u = fetchParseURL(walk)) != NULL) {
+				if (nmirrors == PKG_HTTP_MIRROR_LIST_MAX_ENTRIES) {
+					fetchFreeURL(u);
+					pkg_emit_error("HTTP mirror list has too many entries");
+					goto done;
+				}
 				m = xmalloc(sizeof(struct http_mirror));
 				m->reldoc = withdoc;
 				m->url = u;
 				m->next = NULL;
-				LL_APPEND(repo->http, m);
+				LL_APPEND(new_mirrors, m);
+				nmirrors++;
 			}
 		}
+		if (c == EOF)
+			break;
 	}
+	accepted = true;
 
-	free(line);
+done:
 	fclose(f);
+	if (accepted) {
+		LL_CONCAT(repo->http, new_mirrors);
+	} else {
+		LL_FOREACH_SAFE(new_mirrors, m, tmp) {
+			fetchFreeURL(m->url);
+			free(m);
+		}
+	}
 }
 
 /*
@@ -129,7 +177,7 @@ libfetch_open(struct pkg_repo *repo, struct fetch_item *fi)
 	struct dns_srvinfo *srv_current = NULL;
 	struct http_mirror *http_current = NULL;
 	struct url_stat st;
-	xstring *fetchOpts = NULL;
+	sb_t fetchOpts = sb_init();
 
 	max_retry = pkg_object_int(pkg_config_get("FETCH_RETRY"));
 	if (max_retry < 0)
@@ -243,17 +291,16 @@ libfetch_open(struct pkg_repo *repo, struct fetch_item *fi)
 			u->doc = docpath;
 			u->port = http_current->url->port;
 		}
-		fetchOpts = xstring_new();
-		xstring_puts(fetchOpts, "i");
+		sb_cat(&fetchOpts, "i");
 		if (repo->ip == IPV4)
-			xstring_puts(fetchOpts, "4");
+			sb_cat(&fetchOpts, "4");
 		else if (repo->ip == IPV6)
-			xstring_puts(fetchOpts, "6");
+			sb_cat(&fetchOpts, "6");
 
 		if (ctx.debug_level >= 4)
-			xstring_puts(fetchOpts, "v");
+			sb_cat(&fetchOpts, "v");
 
-		opts = xstring_get(fetchOpts);
+		opts = sb_get(&fetchOpts);
 		pkg_dbg(PKG_DBG_FETCH, 1,
 		    "libfetch> fetching from: %s://%s%s%s%s with opts \"%s\"",
 		    u->scheme,

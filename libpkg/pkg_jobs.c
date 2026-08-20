@@ -57,7 +57,7 @@
 #include <ctype.h>
 
 #include "pkg.h"
-#include <xstring.h>
+#include "pkg/sb.h"
 #include "private/event.h"
 #include "private/pkg.h"
 #include "private/pkgdb.h"
@@ -193,8 +193,8 @@ pkg_jobs_free(struct pkg_jobs *j)
 	if (j->triggers.schema != NULL)
 		ucl_object_unref(j->triggers.schema);
 	pkg_deferred_rc_free(&j->rc);
-	pkghash_destroy(j->orphaned);
-	pkghash_destroy(j->notorphaned);
+	stringset_destroy(j->orphaned);
+	stringset_destroy(j->notorphaned);
 	vec_autofree(&j->system_shlibs);
 	pkg_conflicts_free(j);
 	vec_free_and_free(&j->lockedpkgs, pkg_free);
@@ -206,6 +206,7 @@ pkg_jobs_maybe_match_url(struct job_pattern *jp, const char *pattern)
 {
 	char path[MAXPATHLEN];
 	const char *name;
+	int fd;
 
 	if (strncmp(pattern, "http://", 7) != 0 &&
 	    strncmp(pattern, "https://", 8) != 0 &&
@@ -221,8 +222,18 @@ pkg_jobs_maybe_match_url(struct job_pattern *jp, const char *pattern)
 	else
 		name++;
 
-	snprintf(path, sizeof(path), "%s/%s.XXXXX",
+	snprintf(path, sizeof(path), "%s/%s.XXXXXX",
 	    getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", name);
+	fd = mkstemp(path);
+	if (fd == -1) {
+		pkg_emit_errno("mkstemp", path);
+		return (false);
+	}
+	if (close(fd) == -1) {
+		pkg_emit_errno("close", path);
+		unlink(path);
+		return (false);
+	}
 
 	if (pkg_fetch_file(NULL, pattern, path, 0, 0, 0) != EPKG_OK) {
 		pkg_emit_error("Failed to fetch package from '%s'", pattern);
@@ -625,7 +636,7 @@ _is_orphaned(struct pkg_jobs *j, const char *uid)
 	universe_itemv_t *uv;
 	struct pkg *npkg;
 
-	if (pkghash_get(j->notorphaned, uid) != NULL)
+	if (stringset_contains(j->notorphaned, uid))
 		return (false);
 	uv = pkg_jobs_universe_find(j->universe, uid);
 	if (uv != NULL) {
@@ -655,9 +666,9 @@ _is_orphaned(struct pkg_jobs *j, const char *uid)
 static bool
 is_orphaned(struct pkg_jobs *j, const char *uid)
 {
-	if (pkghash_get(j->orphaned, uid) != NULL)
+	if (stringset_contains(j->orphaned, uid))
 		return (true);
-	if (pkghash_get(j->notorphaned, uid) != NULL)
+	if (stringset_contains(j->notorphaned, uid))
 		return (false);
 	/*
 	 * Optimistically mark as orphaned before evaluating to break
@@ -666,11 +677,11 @@ is_orphaned(struct pkg_jobs *j, const char *uid)
 	 * provided by A). If _is_orphaned() returns false, we correct
 	 * the entry below.
 	 */
-	pkghash_safe_add(j->orphaned, uid, NULL, NULL);
+	stringset_safe_add(&j->orphaned, uid);
 	if (_is_orphaned(j, uid))
 		return (true);
-	pkghash_del(j->orphaned, uid);
-	pkghash_safe_add(j->notorphaned, uid, NULL, NULL);
+	stringset_del(j->orphaned, uid);
+	stringset_safe_add(&j->notorphaned, uid);
 	return (false);
 }
 
@@ -1017,7 +1028,7 @@ static bool
 charv_diff(const charv_t *local, const charv_t *remote,
     const char *label, char **reason)
 {
-	xstring *diff = NULL;
+	sb_t diff = sb_init();
 	int nd = 0;
 	size_t li = 0, ri = 0;
 	size_t ll = vec_len(local);
@@ -1029,13 +1040,11 @@ charv_diff(const charv_t *local, const charv_t *remote,
 		else if (ri >= rl) cmp = -1;
 		else cmp = strcmp(local->d[li], remote->d[ri]);
 		if (cmp < 0) {
-			if (diff == NULL) diff = xstring_new();
-			xstring_printf(diff, "%s%s (removed)",
+			sb_printf(&diff, "%s%s (removed)",
 			    nd ? ", " : "", local->d[li]);
 			nd++; li++;
 		} else if (cmp > 0) {
-			if (diff == NULL) diff = xstring_new();
-			xstring_printf(diff, "%s%s (added)",
+			sb_printf(&diff, "%s%s (added)",
 			    nd ? ", " : "", remote->d[ri]);
 			nd++; ri++;
 		} else {
@@ -1043,10 +1052,10 @@ charv_diff(const charv_t *local, const charv_t *remote,
 		}
 	}
 	if (nd > 0) {
-		xstring_flush(diff);
+
 		free(*reason);
-		xasprintf(reason, "%s: %s", label, diff->buf);
-		xstring_free(diff);
+		xasprintf(reason, "%s: %s", label, sb_str(&diff));
+		sb_fini(&diff);
 		return (true);
 	}
 	return (false);
@@ -1100,11 +1109,11 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 
 	/* compare options */
 	if (pkg_object_bool(pkg_config_get("PKG_REINSTALL_ON_OPTIONS_CHANGE"))) {
-		xstring *optdiff = NULL;
+		sb_t optdiff = sb_init();
 		int ndiffs = 0;
 		size_t i = 0, j = 0;
-		size_t cntl = vec_len(&lp->options);
-		size_t cntr = vec_len(&rp->options);
+		size_t cntl = lp->options.len;
+		size_t cntr = rp->options.len;
 		while (i < cntl || j < cntr) {
 			int cmp;
 			if (i >= cntl) cmp = 1;
@@ -1113,25 +1122,19 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 			    rp->options.d[j]->key);
 			if (cmp < 0) {
 				/* only in local: option removed */
-				if (optdiff == NULL)
-					optdiff = xstring_new();
-				xstring_printf(optdiff, "%s%s (removed)",
+				sb_printf(&optdiff, "%s%s (removed)",
 				    ndiffs ? ", " : "", lp->options.d[i]->key);
 				ndiffs++; i++;
 			} else if (cmp > 0) {
 				/* only in remote: option added */
-				if (optdiff == NULL)
-					optdiff = xstring_new();
-				xstring_printf(optdiff, "%s%s (added)",
+				sb_printf(&optdiff, "%s%s (added)",
 				    ndiffs ? ", " : "", rp->options.d[j]->key);
 				ndiffs++; j++;
 			} else {
 				/* same option: compare values */
 				if (!STREQ(lp->options.d[i]->value,
 				    rp->options.d[j]->value)) {
-					if (optdiff == NULL)
-						optdiff = xstring_new();
-					xstring_printf(optdiff, "%s%s (%s -> %s)",
+					sb_printf(&optdiff, "%s%s (%s -> %s)",
 					    ndiffs ? ", " : "", lp->options.d[i]->key,
 					    lp->options.d[i]->value,
 					    rp->options.d[j]->value);
@@ -1141,22 +1144,22 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 			}
 		}
 		if (ndiffs > 0) {
-			xstring_flush(optdiff);
 			free(rp->reason);
 			xasprintf(&rp->reason, "option changed: %s",
-			    optdiff->buf);
-			xstring_free(optdiff);
+			    sb_str(&optdiff));
+			sb_fini(&optdiff);
 			return (true);
 		}
+		sb_fini(&optdiff);
 	}
 
 	/* What about the direct deps */
 
-	xstring *diff = NULL;
+	sb_t diff = sb_init();
 	int nd = 0;
 	size_t li = 0, ri = 0;
-	size_t ll = vec_len(&lp->depends);
-	size_t rl = vec_len(&rp->depends);
+	size_t ll = lp->depends.len;
+	size_t rl = rp->depends.len;
 	while (li < ll || ri < rl) {
 		int cmp;
 		if (li >= ll) cmp = 1;
@@ -1165,14 +1168,12 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 		    rp->depends.d[ri].name);
 		if (cmp < 0) {
 			/* only in local: dependency removed */
-			if (diff == NULL) diff = xstring_new();
-			xstring_printf(diff, "%s%s (removed)",
+			sb_printf(&diff, "%s%s (removed)",
 			    nd ? ", " : "", lp->depends.d[li].name);
 			nd++; li++;
 		} else if (cmp > 0) {
 			/* only in remote: dependency added */
-			if (diff == NULL) diff = xstring_new();
-			xstring_printf(diff, "%s%s (added)",
+			sb_printf(&diff, "%s%s (added)",
 			    nd ? ", " : "", rp->depends.d[ri].name);
 			nd++; ri++;
 		} else {
@@ -1182,8 +1183,7 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 			if (lorig != rorig &&
 			    (lorig == NULL || rorig == NULL ||
 			     strcmp(lorig, rorig) != 0)) {
-				if (diff == NULL) diff = xstring_new();
-				xstring_printf(diff, "%s%s (origin changed)",
+				sb_printf(&diff, "%s%s (origin changed)",
 				    nd ? ", " : "", rp->depends.d[ri].name);
 				nd++;
 			}
@@ -1191,13 +1191,13 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 		}
 	}
 	if (nd > 0) {
-		xstring_flush(diff);
 		free(rp->reason);
 		xasprintf(&rp->reason, "direct dependency changed: %s",
-		    diff->buf);
-		xstring_free(diff);
+		    sb_str(&diff));
+		sb_fini(&diff);
 		return (true);
 	}
+	sb_fini(&diff);
 
 	/* Conflicts */
 	for (;;) {
@@ -1232,56 +1232,51 @@ pkg_jobs_need_upgrade(charv_t *system_shlibs, struct pkg *rp, struct pkg *lp)
 		return (true);
 
 	/* shlibs_required needs special handling for system shlibs */
-	{
-		xstring *diff = NULL;
-		int nd = 0;
-		size_t cntl = vec_len(&lp->shlibs_required);
-		size_t cntr = vec_len(&rp->shlibs_required);
-		bool has_system_shlibs = vec_len(system_shlibs) > 0;
-		size_t i = 0, j = 0;
-		while (i < cntl || j < cntr) {
-			if (has_system_shlibs) {
-				while (i < cntl &&
-				    charv_search(system_shlibs,
-				    lp->shlibs_required.d[i]) != NULL)
-					i++;
-				while (j < cntr &&
-				    charv_search(system_shlibs,
-				    rp->shlibs_required.d[j]) != NULL)
-					j++;
-			}
-			if (i >= cntl && j >= cntr)
-				break;
-			int cmp;
-			if (i >= cntl) cmp = 1;
-			else if (j >= cntr) cmp = -1;
-			else cmp = strcmp(lp->shlibs_required.d[i],
+	sb_reset(&diff);
+	nd = 0;
+	size_t cntl = vec_len(&lp->shlibs_required);
+	size_t cntr = vec_len(&rp->shlibs_required);
+	bool has_system_shlibs = vec_len(system_shlibs) > 0;
+	size_t i = 0, j = 0;
+	while (i < cntl || j < cntr) {
+		if (has_system_shlibs) {
+			while (i < cntl &&
+			    charv_search(system_shlibs,
+			    lp->shlibs_required.d[i]) != NULL)
+				i++;
+			while (j < cntr &&
+			    charv_search(system_shlibs,
+			    rp->shlibs_required.d[j]) != NULL)
+				j++;
+		}
+		if (i >= cntl && j >= cntr)
+			break;
+		int cmp;
+		if (i >= cntl) cmp = 1;
+		else if (j >= cntr) cmp = -1;
+		else cmp = strcmp(lp->shlibs_required.d[i],
+		    rp->shlibs_required.d[j]);
+		if (cmp < 0) {
+			sb_printf(&diff, "%s%s (removed)",
+			    nd ? ", " : "",
+			    lp->shlibs_required.d[i]);
+			nd++; i++;
+		} else if (cmp > 0) {
+			sb_printf(&diff, "%s%s (added)",
+			    nd ? ", " : "",
 			    rp->shlibs_required.d[j]);
-			if (cmp < 0) {
-				if (diff == NULL) diff = xstring_new();
-				xstring_printf(diff, "%s%s (removed)",
-				    nd ? ", " : "",
-				    lp->shlibs_required.d[i]);
-				nd++; i++;
-			} else if (cmp > 0) {
-				if (diff == NULL) diff = xstring_new();
-				xstring_printf(diff, "%s%s (added)",
-				    nd ? ", " : "",
-				    rp->shlibs_required.d[j]);
-				nd++; j++;
-			} else {
-				i++; j++;
-			}
+			nd++; j++;
+		} else {
+			i++; j++;
 		}
-		if (nd > 0) {
-			xstring_flush(diff);
-			free(rp->reason);
-			xasprintf(&rp->reason,
-			    "required shared library changed: %s",
-			    diff->buf);
-			xstring_free(diff);
-			return (true);
-		}
+	}
+	if (nd > 0) {
+		free(rp->reason);
+		xasprintf(&rp->reason,
+		    "required shared library changed: %s",
+		    sb_str(&diff));
+		sb_fini(&diff);
+		return (true);
 	}
 
 	return (false);
@@ -2092,22 +2087,17 @@ pkg_jobs_execute(struct pkg_jobs *j)
 	size_t current_action = 0;
 
 //j->triggers.cleanup = triggers_load(true);
-	if (j->type == PKG_JOBS_INSTALL) {
-		pre = PKG_PLUGIN_HOOK_PRE_INSTALL;
-		post = PKG_PLUGIN_HOOK_POST_INSTALL;
-	}
-	else if (j->type == PKG_JOBS_UPGRADE) {
-		pre = PKG_PLUGIN_HOOK_PRE_UPGRADE;
-		post = PKG_PLUGIN_HOOK_POST_UPGRADE;
-	}
-	else if (j->type == PKG_JOBS_AUTOREMOVE){
-		pre = PKG_PLUGIN_HOOK_PRE_AUTOREMOVE;
-		post = PKG_PLUGIN_HOOK_POST_AUTOREMOVE;
-	}
-	else {
-		pre = PKG_PLUGIN_HOOK_PRE_DEINSTALL;
-		post = PKG_PLUGIN_HOOK_POST_DEINSTALL;
-	}
+	static const struct {
+		pkg_plugin_hook_t pre;
+		pkg_plugin_hook_t post;
+	} hook_map[] = {
+		[PKG_JOBS_INSTALL]   = { PKG_PLUGIN_HOOK_PRE_INSTALL,   PKG_PLUGIN_HOOK_POST_INSTALL },
+		[PKG_JOBS_UPGRADE]   = { PKG_PLUGIN_HOOK_PRE_UPGRADE,   PKG_PLUGIN_HOOK_POST_UPGRADE },
+		[PKG_JOBS_AUTOREMOVE]= { PKG_PLUGIN_HOOK_PRE_AUTOREMOVE,PKG_PLUGIN_HOOK_POST_AUTOREMOVE },
+		[PKG_JOBS_DEINSTALL]  = { PKG_PLUGIN_HOOK_PRE_DEINSTALL, PKG_PLUGIN_HOOK_POST_DEINSTALL },
+	};
+	pre = hook_map[j->type].pre;
+	post = hook_map[j->type].post;
 
 	if (j->flags & PKG_FLAG_SKIP_INSTALL)
 		return (EPKG_OK);

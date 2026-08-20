@@ -35,11 +35,16 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/param.h>
+#if __has_include(<sys/procctl.h>)
+#include <sys/procctl.h>
+#endif
 #include <stdio.h>
 
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
@@ -262,48 +267,47 @@ int
 format_exec_cmd(char **dest, const char *in, const char *prefix,
     const char *plist_file, const char *line, int argc, char **argv, bool lua)
 {
-	xstring *buf;
+	sb_t buf = sb_init();
 	char path[MAXPATHLEN];
 	char *cp;
 	const char *ptr;
 	size_t sz;
 
-	buf = xstring_new();
 	cp = NULL;
 
 	if (line != NULL && argv != NULL) {
 		if (lua) {
-			xstring_printf(buf, "-- args: %s\n", line);
+			sb_printf(&buf, "-- args: %s\n", line);
 		} else {
-			xstring_printf(buf, "# args: %s\n", line);
+			sb_printf(&buf, "# args: %s\n", line);
 		}
 	}
 
 	while (in[0] != '\0') {
 		if (in[0] != '%') {
-			xstring_putc(buf, in[0]);
+			sb_cat_c(&buf, in[0]);
 			in++;
 			continue;
 		}
 		in++;
 		switch(in[0]) {
 		case 'D':
-			xstring_printf(buf, "%s", prefix);
+			sb_printf(&buf, "%s", prefix);
 			break;
 		case 'F':
 			if (plist_file == NULL || plist_file[0] == '\0') {
 				pkg_emit_error("No files defined %%F couldn't "
 				    "be expanded, ignoring %s", in);
-				xstring_free(buf);
+				sb_fini(&buf);
 				return (EPKG_FATAL);
 			}
-			xstring_printf(buf, "%s", plist_file);
+			sb_printf(&buf, "%s", plist_file);
 			break;
 		case 'f':
 			if (plist_file == NULL || plist_file[0] == '\0') {
 				pkg_emit_error("No files defined %%f couldn't "
 				    "be expanded, ignoring %s", in);
-				xstring_free(buf);
+				sb_fini(&buf);
 				return (EPKG_FATAL);
 			}
 			ptr = strrchr(plist_file, '/');
@@ -311,13 +315,13 @@ format_exec_cmd(char **dest, const char *in, const char *prefix,
 				ptr++;
 			else
 				ptr = plist_file;
-			xstring_printf(buf, "%s", ptr);
+			sb_printf(&buf, "%s", ptr);
 			break;
 		case 'B':
 			if (plist_file == NULL || plist_file[0] == '\0') {
 				pkg_emit_error("No files defined %%B couldn't "
 				    "be expanded, ignoring %s", in);
-				xstring_free(buf);
+				sb_fini(&buf);
 				return (EPKG_FATAL);
 			}
 			if (prefix[strlen(prefix) - 1] == '/')
@@ -328,14 +332,14 @@ format_exec_cmd(char **dest, const char *in, const char *prefix,
 				    plist_file);
 			cp = strrchr(path, '/');
 			cp[0] = '\0';
-			xstring_printf(buf, "%s", path);
+			sb_printf(&buf, "%s", path);
 			break;
 		case '%':
-			xstring_putc(buf, '%');
+			sb_cat_c(&buf, '%');
 			break;
 		case '@':
 			if (line != NULL) {
-				xstring_printf(buf, "%s", line);
+				sb_printf(&buf, "%s", line);
 				break;
 			}
 
@@ -346,7 +350,7 @@ format_exec_cmd(char **dest, const char *in, const char *prefix,
 			 */
 			/* FALLTHRU */
 		case '#':
-			xstring_printf(buf, "%d", argc);
+			sb_printf(&buf, "%d", argc);
 			break;
 		default:
 			if ((sz = strspn(in, "0123456789")) > 0) {
@@ -355,21 +359,21 @@ format_exec_cmd(char **dest, const char *in, const char *prefix,
 					pkg_emit_error("Requesting argument "
 					    "%%%d while only %d arguments are"
 					    " available", pos, argc);
-					xstring_free(buf);
+					sb_fini(&buf);
 					return (EPKG_FATAL);
 				}
-				xstring_printf(buf, "%s", argv[pos -1]);
+				sb_printf(&buf, "%s", argv[pos -1]);
 				in += sz -1;
 				break;
 			}
-			xstring_printf(buf, "%c%c", '%', in[0]);
+			sb_printf(&buf, "%c%c", '%', in[0]);
 			break;
 		}
 
 		in++;
 	}
 
-	*dest = xstring_get(buf);
+	*dest = sb_get(&buf);
 
 	return (EPKG_OK);
 }
@@ -524,6 +528,45 @@ set_blocking(int fd)
  * that same order) as arguments.
 */
 extern char **environ;
+
+static void
+pkg_closefrom_proc(int lowfd)
+{
+	DIR *dirp;
+	struct dirent *dent;
+	char *endp;
+	long fd;
+
+	dirp = opendir("/proc/self/fd");
+	if (dirp == NULL)
+		return;
+	while ((dent = readdir(dirp)) != NULL) {
+		fd = strtol(dent->d_name, &endp, 10);
+		if (dent->d_name != endp && *endp == '\0' &&
+		    fd >= 0 && fd < INT_MAX && fd >= lowfd && fd != dirfd(dirp))
+			(void) close((int) fd);
+	}
+	(void) closedir(dirp);
+}
+
+void
+pkg_closefrom(int lowfd)
+{
+#if defined(__linux__) || defined(__illumos__) || defined(__sun)
+	pkg_closefrom_proc(lowfd);
+#elif defined(HAVE_CLOSEFROM)
+	closefrom(lowfd);
+#else
+	long maxfd = sysconf(_SC_OPEN_MAX);
+	long fd;
+
+	if (maxfd < 0)
+		maxfd = 256;
+	for (fd = lowfd; fd < maxfd; fd++)
+		(void) close((int) fd);
+#endif
+}
+
 pid_t
 process_spawn_pipe(FILE *inout[2], const char *command)
 {
@@ -570,7 +613,7 @@ process_spawn_pipe(FILE *inout[2], const char *command)
 			dup2(pipes[2], STDIN_FILENO);
 			close(pipes[2]);
 		}
-		closefrom(STDERR_FILENO + 1);
+		pkg_closefrom(STDERR_FILENO + 1);
 
 		execve(_PATH_BSHELL, argv, environ);
 
@@ -583,11 +626,11 @@ process_spawn_pipe(FILE *inout[2], const char *command)
 static int
 ucl_buf_append_character(unsigned char c, size_t len, void *data)
 {
-	xstring *buf = data;
+	sb_t *buf = data;
 	size_t i;
 
 	for (i = 0; i < len; i++)
-		xstring_printf(buf, "%c", c);
+		sb_printf(buf, "%c", c);
 
 	return (0);
 }
@@ -595,9 +638,9 @@ ucl_buf_append_character(unsigned char c, size_t len, void *data)
 static int
 ucl_buf_append_len(const unsigned char *str, size_t len, void *data)
 {
-	xstring *buf = data;
+	sb_t *buf = data;
 
-	xstring_printf(buf, "%.*s", (int)len, str);
+	sb_printf(buf, "%.*s", (int)len, str);
 
 	return (0);
 }
@@ -605,9 +648,9 @@ ucl_buf_append_len(const unsigned char *str, size_t len, void *data)
 static int
 ucl_buf_append_int(int64_t val, void *data)
 {
-	xstring *buf = data;
+	sb_t *buf = data;
 
-	xstring_printf(buf, "%"PRId64, val);
+	sb_printf(buf, "%"PRId64, val);
 
 	return (0);
 }
@@ -615,15 +658,15 @@ ucl_buf_append_int(int64_t val, void *data)
 static int
 ucl_buf_append_double(double val, void *data)
 {
-	xstring *buf = data;
+	sb_t *buf = data;
 	const double delta = 0.0000001;
 
 	if (val == (double)(int)val) {
-		xstring_printf(buf, "%.1lf", val);
+		sb_printf(buf, "%.1lf", val);
 	} else if (fabs(val - (double)(int)val) < delta) {
-		xstring_printf(buf, "%.*lg", DBL_DIG, val);
+		sb_printf(buf, "%.*lg", DBL_DIG, val);
 	} else {
-		xstring_printf(buf, "%lf", val);
+		sb_printf(buf, "%lf", val);
 	}
 
 	return (0);
@@ -662,7 +705,7 @@ ucl_object_emit_fd(const ucl_object_t *obj, enum ucl_emitter emit_type, int fd)
 
 bool
 ucl_object_emit_buf(const ucl_object_t *obj, enum ucl_emitter emit_type,
-                     xstring **buf)
+                     sb_t **buf)
 {
 	bool ret = false;
 	struct ucl_emitter_functions func = {
@@ -672,7 +715,7 @@ ucl_object_emit_buf(const ucl_object_t *obj, enum ucl_emitter emit_type,
 		.ucl_emitter_append_double = ucl_buf_append_double
 	};
 
-	xstring_renew(*buf);
+	sb_reset(*buf);
 
 	func.ud = *buf;
 
@@ -1041,16 +1084,16 @@ hidden_tempfile(char *buf, int buflen, const char *path)
 char *
 json_escape(const char *str)
 {
-	xstring *buf = xstring_new();
+	sb_t buf = sb_init();
 
 	while (str != NULL && *str != '\0') {
 		if (*str == '"' || *str == '\\')
-			xstring_putc(buf, '\\');
-		xstring_putc(buf, *str);
+			sb_cat_c(&buf, '\\');
+		sb_cat_c(&buf, *str);
 		str++;
 	}
 
-	return (xstring_get(buf));
+	return (sb_get(&buf));
 }
 
 const char *
@@ -1265,4 +1308,43 @@ ucl_parse_buf(const char *buf, size_t len, const char *name)
 	ucl_parser_free(p);
 
 	return (obj);
+}
+
+void
+pkg_reaper_acquire(struct pkg_reaper *r)
+{
+#ifdef PROC_REAP_KILL
+	r->mypid = getpid();
+	r->do_reap = procctl(P_PID, r->mypid, PROC_REAP_ACQUIRE, NULL) == 0;
+#else
+	r->mypid = getpid();
+	r->do_reap = false;
+#endif
+}
+
+void
+pkg_reaper_release(struct pkg_reaper *r)
+{
+#ifdef PROC_REAP_KILL
+	struct procctl_reaper_status info;
+	struct procctl_reaper_kill killemall;
+
+	if (!r->do_reap)
+		return;
+
+	memset(&info, 0, sizeof(info));
+	memset(&killemall, 0, sizeof(killemall));
+
+	procctl(P_PID, r->mypid, PROC_REAP_STATUS, &info);
+	if (info.rs_children != 0) {
+		killemall.rk_sig = SIGKILL;
+		killemall.rk_flags = 0;
+		if (procctl(P_PID, r->mypid, PROC_REAP_KILL, &killemall) != 0) {
+			if (errno != ESRCH || killemall.rk_killed != 0) {
+				pkg_errno("%s", "Failed to kill all processes");
+			}
+		}
+	}
+	procctl(P_PID, r->mypid, PROC_REAP_RELEASE, NULL);
+#endif
 }

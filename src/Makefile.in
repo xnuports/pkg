@@ -108,6 +108,10 @@ endif
 
 # For libarchive
 STATIC_LDFLAGS+=	-lbz2 -lz -llzma @ZSTDLIB@
+@if HAVE_LIBMD
+# liblzma (static) needs libmd's SHA256, so it must come after -llzma.
+STATIC_LDFLAGS+=	-lmd
+@endif
 
 VPATH=	$(top_srcdir)/src
 

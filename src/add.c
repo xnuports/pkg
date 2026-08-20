@@ -36,8 +36,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <getopt.h>
-#include <xstring.h>
 
+#include <pkg/sb.h>
 #include <pkg.h>
 
 #include "pkgcli.h"
@@ -65,7 +65,7 @@ int
 exec_add(int argc, char **argv)
 {
 	struct pkgdb *db = NULL;
-	xstring *failedpkgs = NULL;
+	sb_t failedpkgs = sb_init();
 	char path[MAXPATHLEN];
 	char *env, *file;
 	int retcode;
@@ -142,10 +142,10 @@ exec_add(int argc, char **argv)
 	if (!pkgdb_lock_or_fail(db, PKGDB_LOCK_EXCLUSIVE))
 		return (EXIT_FAILURE);
 
-	failedpkgs = xstring_new();
 	for (i = 0; i < argc; i++) {
 		if (is_url(argv[i]) == EPKG_OK) {
 			const char *name = strrchr(argv[i], '/');
+			int fd;
 			if (name == NULL)
 				name = argv[i];
 			else
@@ -153,7 +153,19 @@ exec_add(int argc, char **argv)
 
 			if ((env = getenv("TMPDIR")) == NULL)
 				env = "/tmp";
-			snprintf(path, sizeof(path), "%s/%s.XXXXX", env, name);
+			snprintf(path, sizeof(path), "%s/%s.XXXXXX", env, name);
+			fd = mkstemp(path);
+			if (fd == -1) {
+				warn("mkstemp %s", path);
+				retcode = EPKG_FATAL;
+				break;
+			}
+			if (close(fd) == -1) {
+				warn("close %s", path);
+				unlink(path);
+				retcode = EPKG_FATAL;
+				break;
+			}
 			if ((retcode = pkg_fetch_file(NULL, argv[i], path, 0, 0, 0)) != EPKG_OK)
 				break;
 
@@ -172,9 +184,9 @@ exec_add(int argc, char **argv)
 				warn("%s", file);
 				if (saved_errno == ENOENT)
 					warnx("Was 'pkg install %s' meant?", file);
-				xstring_printf(failedpkgs, "%s", argv[i]);
+				sb_cat(&failedpkgs, argv[i]);
 				if (i != argc - 1)
-					xstring_printf(failedpkgs, ", ");
+					sb_cat(&failedpkgs, ", ");
 				failedpkgcount++;
 				continue;
 			}
@@ -182,9 +194,9 @@ exec_add(int argc, char **argv)
 		}
 
 		if ((retcode = pkg_add(db, file, f, location)) != EPKG_OK) {
-			xstring_printf(failedpkgs, "%s", argv[i]);
+			sb_cat(&failedpkgs, argv[i]);
 			if (i != argc - 1)
-				xstring_printf(failedpkgs, ", ");
+				sb_printf(&failedpkgs, ", ");
 			failedpkgcount++;
 		}
 
@@ -196,18 +208,14 @@ exec_add(int argc, char **argv)
 	pkgdb_close(db);
 
 	if(failedpkgcount > 0) {
-		xstring_flush(failedpkgs);
-		printf("\nFailed to install the following %d package(s): %s\n", failedpkgcount, failedpkgs->buf);
+		printf("\nFailed to install the following %d package(s): %s\n", failedpkgcount, sb_str(&failedpkgs));
 		retcode = EPKG_FATAL;
 	}
-	xstring_free(failedpkgs);
+	sb_fini(&failedpkgs);
 
 	pkg_add_triggers();
-	if (messages != NULL && !quiet) {
-		xstring_flush(messages);
-		printf("%s", messages->buf);
-	}
+	if (messages && messages->len > 0 && !quiet)
+		printf("%s", sb_str(messages));
 
 	return (retcode == EPKG_OK ? EXIT_SUCCESS : EXIT_FAILURE);
 }
-

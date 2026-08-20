@@ -49,16 +49,12 @@ pkg_dep_get(struct pkg_dep const * const d, const pkg_dep_attr attr)
 	switch (attr) {
 	case PKG_DEP_NAME:
 		return (d->name);
-		break;
 	case PKG_DEP_ORIGIN:
 		return (d->origin);
-		break;
 	case PKG_DEP_VERSION:
 		return (d->version);
-		break;
 	default:
 		return (NULL);
-		break;
 	}
 }
 
@@ -113,11 +109,10 @@ pkg_dir_free(struct pkg_dir *dir)
 const char *
 pkg_script_get(struct pkg const * const p, pkg_script i)
 {
-	if (p->scripts[i] == NULL)
+	if (p->scripts[i].len == 0)
 		return (NULL);
 
-	xstring_flush(p->scripts[i]);
-	return (p->scripts[i]->buf);
+	return (sb_str(&p->scripts[i]));
 }
 
 /*

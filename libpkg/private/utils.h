@@ -16,7 +16,7 @@
 #include <sys/param.h>
 #include <ucl.h>
 #include <pkg.h>
-#include <xstring.h>
+#include <pkg/sb.h>
 
 #define STARTS_WITH(string, needle) (strncasecmp(string, needle, strlen(needle)) == 0)
 #define RELATIVE_PATH(p) (&p[strspn(p, "/")])
@@ -81,10 +81,11 @@ int pkg_symlink_cksumat(int fd, const char *path, const char *root,
     char *cksum);
 
 pid_t process_spawn_pipe(FILE *inout[2], const char *command);
+void pkg_closefrom(int lowfd);
 
 void *parse_mode(const char *str);
 int *text_diff(char *a, char *b);
-int merge_3way(char *pivot, char *v1, char *v2, xstring *out);
+int merge_3way(char *pivot, char *v1, char *v2, sb_t *out);
 bool mkdirat_p(int fd, const char *path);
 int get_socketpair(int *);
 int checkflags(const char *mode, int *optr);
@@ -115,5 +116,13 @@ gid_t get_gid_from_gname(const char *);
 
 ucl_object_t *ucl_parse_fd(int fd, const char *name);
 ucl_object_t *ucl_parse_buf(const char *buf, size_t len, const char *name);
+
+struct pkg_reaper {
+	bool do_reap;
+	pid_t mypid;
+};
+
+void pkg_reaper_acquire(struct pkg_reaper *r);
+void pkg_reaper_release(struct pkg_reaper *r);
 
 #endif

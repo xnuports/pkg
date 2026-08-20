@@ -25,6 +25,7 @@ options \
 	"with-asan            => build with Clang AddressSanitizer (non-prod use)" \
 	"with-lsan            => build with Clang LeakSanitizer (non-prod use)" \
 	"with-ubsan           => build with Clang UndefinedBehaviorSanitizer (non-prod use)" \
+	"with-tests           => build tests" \
 	"with-tsan            => build with Clang ThreadSanitizer (non-prod use)" \
 	"with-openssl.pc      => build with openssl via pkg-config" \
 	"default-format:tzst  => Default compression format: tzst (default), txz, tbz, tar"
@@ -68,7 +69,7 @@ define LIBSOEXT "$_libsoext"
 
 # Git hash
 define GITHASH ""
-if cc_check_progs git 2>/dev/null && [ -d "$_srcdir/.git" ]; then
+if cc_check_progs git 2>/dev/null && [ -e "$_srcdir/.git" ]; then
 	_gitrev=$(git -C "$_srcdir" rev-parse --short HEAD 2>/dev/null) || true
 	_gitdirty=$(git -C "$_srcdir" diff-index -m --name-only HEAD 2>/dev/null) || true
 	if [ -n "$_gitrev" ]; then
@@ -147,54 +148,14 @@ if [ "$(get_define HAVE_ZSTD_VERSIONNUMBER)" = "1" ]; then
 	define ZSTDLIB "-lprivatezstd"
 fi
 
-# Atomics
-msg_checking "Checking for atomic builtins... "
-if cctest '
-	volatile unsigned long val = 1;
-	__sync_synchronize();
-	__sync_val_compare_and_swap(&val, 1, 0);
-	__sync_add_and_fetch(&val, 1);
-	__sync_sub_and_fetch(&val, 1);
-	return 0;
-'; then
-	msg_result "ok"
-	define_feature atomic_builtins
-else
-	msg_result "no"
-	define_feature atomic_builtins 0
-fi
-
-# /proc/self/fd
-msg_checking "Checking for /proc/self/fd support... "
-if [ -e /proc/self/fd ]; then
-	msg_result "ok"
-	define_feature proc-pid
-else
-	msg_result "no"
-	define_feature proc-pid 0
-fi
-
-# Required functions
-for _fct in memmove usleep pread pwrite; do
-	cc_check_functions "$_fct"
-	_FCTUP=$(echo "$_fct" | tr '[:lower:]' '[:upper:]')
-	if [ "$(get_define "HAVE_${_FCTUP}")" != "1" ]; then
-		user_error "Cannot find $_fct"
-	fi
-done
-
 # Struct members
-cc_with "-includes netinet/in.h" cc_check_members "struct sockaddr_in.sin_len"
-cc_with "-includes sys/stat.h" cc_check_members "struct stat.st_mtim" "struct stat.st_flags"
-
-# SQLite check
-cc_check_functions strchrnul
+cc_with "-includes sys/stat.h" cc_check_members "struct stat.st_flags"
 
 # pkg function checks
 cc_check_functions arc4random arc4random_stir chflagsat \
 	closefrom fopencookie funopen getprogname \
-	strtofflags strtonum utimensat __res_setservers \
-	fflagstostr strchrnul copy_file_range reallocf
+	strtofflags strtonum __res_setservers \
+	fflagstostr strchrnul copy_file_range
 
 # humanize_number declaration
 cc_with "-includes libutil.h" cc_check_decls humanize_number
@@ -224,22 +185,6 @@ if ! have_func dlclose; then
 		define_feature LIBDL
 	fi
 fi
-
-# Endian functions
-for _fct in be16dec be16enc be32dec be32enc be64dec be64enc \
-            le16dec le16enc le32dec le32enc le64dec le64enc; do
-	_FCTUP=$(echo "$_fct" | tr '[:lower:]' '[:upper:]')
-	for _header in endian.h sys/endian.h machine/endian.h; do
-		cc_check_includes "$_header" >/dev/null 2>&1 || continue
-		_HDR=$(echo "$_header" | tr '[:lower:]/.' '[:upper:]__')
-		if [ "$(get_define "HAVE_${_HDR}")" = "1" ]; then
-			cc_with "-includes $_header" cc_check_decls "$_fct"
-			if [ "$(get_define "HAVE_DECL_${_FCTUP}")" = "1" ]; then
-				break
-			fi
-		fi
-	done
-done
 
 # Darwin / libelf
 case "$_host" in
@@ -287,6 +232,8 @@ if opt_bool with-asan; then
 	esac
 	define asan 1
 	undefine HAVE_STATIC
+
+	msg "Enabling ASAN"
 fi
 if opt_bool with-lsan; then
 	define_append LSAN_CFLAGS -O0 -g -fsanitize=leak
@@ -295,30 +242,47 @@ if opt_bool with-lsan; then
 		*-linux*) define_append LSAN_LDFLAGS -ldl ;;
 	esac
 	define lsan 1
+
+	msg "Enabling LSAN"
 fi
 if opt_bool with-ubsan; then
 	define_append UBSAN_CFLAGS -D_MUM_UNALIGNED_ACCESS=0
 	define_append UBSAN_CFLAGS -O0 -g -fsanitize=undefined
 	define_append UBSAN_LDFLAGS -fsanitize=undefined
 	define ubsan 1
+
+	msg "Enabled UBSAN"
 fi
 if opt_bool with-tsan; then
 	define_append TSAN_CFLAGS -O1 -g -fsanitize=thread
 	define_append TSAN_LDFLAGS -fsanitize=thread
 	define tsan 1
+
+	msg "Enabled TSAN"
 fi
 if opt_bool with-coverage; then
-	define_append COVERAGE_CFLAGS -O0 -g -fprofile-arcs -ftest-coverage -fprofile-instr-generate -fcoverage-mapping -DCOVERAGE=1
-	define_append COVERAGE_LDFLAGS -fprofile-instr-generate
+	define_append COVERAGE_CFLAGS -O0 -g --coverage -fprofile-instr-generate -fcoverage-mapping -DCOVERAGE=1
+	define_append COVERAGE_LDFLAGS --coverage -fprofile-instr-generate
 	define coverage 1
+
+	msg "Enabled runtime code coverage"
 fi
 
 # pkg-config based dependencies
 if pkg_config_init; then
-	# atf / tests
-	if pkg_config atf-c && cc_check_progs kyua; then
-		define TESTS 1
-		msg "test suite will be built"
+	# tests
+	if opt_bool with-tests; then
+		if ! pkg_config atf-c; then
+			user_error "Cannot find ATF libraries"
+		elif ! cc_check_progs kyua; then
+			user_error "Cannot find kyua"
+		else
+			define TESTS 1
+			msg "test suite will be built"
+		fi
+		user_notice "ATF_C_CFLAGS=$(get_define PKG_ATF_C_CFLAGS)"
+		user_notice "ATF_C_LDFLAGS=$(get_define PKG_ATF_C_LDFLAGS)"
+		user_notice "ATF_C_LIBS=$(get_define PKG_ATF_C_LIBS)"
 	else
 		msg "Skipping test suite"
 	fi
